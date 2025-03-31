@@ -175,7 +175,7 @@ if st.session_state.thinking:
     
     # Rerun to update UI
     thinking_container.empty()
-    st.experimental_rerun()
+    st.rerun()
 
 # Footer
 st.markdown("""
