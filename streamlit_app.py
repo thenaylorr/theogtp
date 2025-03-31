@@ -150,7 +150,7 @@ with st.container():
         
         # Set thinking state to true
         st.session_state.thinking = True
-        st.experimental_rerun()
+        st.rerun()
 
 # Display thinking animation if needed
 if st.session_state.thinking:
