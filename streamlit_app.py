@@ -4,8 +4,11 @@ import random
 import json
 import os
 import hashlib
+import requests
 from datetime import datetime
 from typing import List, Dict
+from bs4 import BeautifulSoup
+import re
 
 # Set page configuration
 st.set_page_config(
@@ -99,6 +102,8 @@ if "current_conversation_id" not in st.session_state:
     st.session_state.current_conversation_id = datetime.now().strftime("%Y%m%d%H%M%S")
 if "sign_up_mode" not in st.session_state:
     st.session_state.sign_up_mode = False
+if "use_web_search" not in st.session_state:
+    st.session_state.use_web_search = True
 
 # Custom CSS for a brighter, more appealing interface
 st.markdown("""
@@ -191,42 +196,258 @@ st.markdown("""
         font-size: 0.9rem;
         margin-top: 0.5rem;
     }
+    .search-results {
+        background-color: #f5f5f5;
+        padding: 0.8rem;
+        border-radius: 6px;
+        margin-bottom: 1rem;
+        font-size: 0.9rem;
+        border-left: 3px solid #ffa726;
+    }
+    .search-result-title {
+        color: #1a0dab;
+        font-weight: 500;
+        margin-bottom: 0.3rem;
+    }
+    .search-result-snippet {
+        color: #545454;
+    }
+    .search-result-url {
+        color: #006621;
+        font-size: 0.8rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# Mock response generator
-def generate_response(prompt: str, temperature: float = 0.7) -> str:
+# Web Search Functions
+def search_google(query, num_results=3):
     """
-    Simulate an AI response. This is a placeholder for actual API integration.
-    
-    Args:
-        prompt: The user input
-        temperature: Controls randomness (not actually used in this mock function)
+    Perform a Google search and return results.
+    This is a simplified implementation using direct HTML scraping.
+    In a production environment, you would use a proper API.
+    """
+    try:
+        # Format the search query
+        search_query = query.replace(' ', '+')
+        url = f"https://www.google.com/search?q={search_query}"
         
-    Returns:
-        A simulated response
+        # Set a user agent to mimic a browser
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        
+        # Send the request
+        response = requests.get(url, headers=headers)
+        
+        # Parse the HTML
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Extract search results
+            search_results = []
+            results = soup.find_all('div', class_='tF2Cxc')
+            
+            for result in results[:num_results]:
+                title_element = result.find('h3')
+                link_element = result.find('a')
+                snippet_element = result.find('div', class_='VwiC3b')
+                
+                if title_element and link_element and snippet_element:
+                    title = title_element.text
+                    link = link_element.get('href')
+                    if link.startswith('/url?q='):
+                        link = link.split('/url?q=')[1].split('&')[0]
+                    snippet = snippet_element.text
+                    
+                    search_results.append({
+                        'title': title,
+                        'link': link,
+                        'snippet': snippet
+                    })
+            
+            return search_results
+        else:
+            return []
+    except Exception as e:
+        print(f"Error in search: {e}")
+        return []
+
+def get_webpage_content(url):
+    """
+    Fetch and extract the main content from a webpage.
+    """
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        
+        response = requests.get(url, headers=headers, timeout=5)
+        
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Remove script and style elements
+            for script in soup(["script", "style"]):
+                script.extract()
+            
+            # Get text
+            text = soup.get_text()
+            
+            # Break into lines and remove leading and trailing space
+            lines = (line.strip() for line in text.splitlines())
+            # Break multi-headlines into a line each
+            chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+            # Remove blank lines
+            text = '\n'.join(chunk for chunk in chunks if chunk)
+            
+            # Limit text length
+            return text[:3000]
+        else:
+            return ""
+    except Exception as e:
+        print(f"Error fetching webpage: {e}")
+        return ""
+
+def search_and_generate_response(query, temperature=0.7):
+    """
+    Enhanced response generation that uses web search for information.
+    """
+    try:
+        # First, search for information
+        search_results = search_google(query, num_results=3)
+        
+        if not search_results:
+            return "I couldn't find specific information about that from the web. " + generate_fallback_response(query, temperature)
+        
+        # Collect content from search results
+        collected_info = []
+        for result in search_results:
+            collected_info.append(f"Title: {result['title']}")
+            collected_info.append(f"Snippet: {result['snippet']}")
+            
+            # Try to get more detailed content from the webpage
+            page_content = get_webpage_content(result['link'])
+            if page_content:
+                # Extract a relevant portion
+                relevant_content = extract_relevant_content(page_content, query)
+                if relevant_content:
+                    collected_info.append(f"Content: {relevant_content}")
+        
+        # Generate a response based on collected information
+        info_text = "\n\n".join(collected_info)
+        
+        # Format the response nicely
+        response = format_search_response(query, search_results, info_text)
+        return response
+    
+    except Exception as e:
+        print(f"Error in search and response: {e}")
+        return "I encountered an error while searching for information. " + generate_fallback_response(query, temperature)
+
+def extract_relevant_content(text, query):
+    """
+    Extract the most relevant portions of text based on the query.
+    """
+    # Simple extraction based on query keywords
+    query_keywords = set(query.lower().split())
+    
+    # Split text into paragraphs
+    paragraphs = text.split('\n')
+    
+    # Score paragraphs based on keyword matches
+    scored_paragraphs = []
+    for para in paragraphs:
+        if len(para) < 20:  # Skip very short paragraphs
+            continue
+        
+        score = sum(1 for word in para.lower().split() if word in query_keywords)
+        scored_paragraphs.append((score, para))
+    
+    # Sort by score and take top 3
+    scored_paragraphs.sort(reverse=True, key=lambda x: x[0])
+    
+    relevant_paragraphs = [para for score, para in scored_paragraphs[:3] if score > 0]
+    
+    if not relevant_paragraphs and scored_paragraphs:
+        # If no paragraphs matched keywords, take the first substantial paragraph
+        for _, para in scored_paragraphs:
+            if len(para) > 100:
+                relevant_paragraphs.append(para)
+                break
+    
+    return " ".join(relevant_paragraphs)[:1000]  # Limit length
+
+def format_search_response(query, search_results, info_text):
+    """
+    Format the final response based on search results and extracted information.
+    """
+    # Start with a brief introduction
+    response = f"Based on my search for information about '{query}', here's what I found:\n\n"
+    
+    # Analyze the collected information to form a coherent response
+    # This is a simplified approach - in a real AI system, you'd use more sophisticated NLP
+    
+    # Extract key sentences from the info text that seem most relevant
+    info_sentences = re.split(r'[.!?]', info_text)
+    info_sentences = [s.strip() for s in info_sentences if len(s.strip()) > 20]
+    
+    # Select sentences that seem most relevant (containing query terms)
+    query_terms = set(query.lower().split())
+    relevant_sentences = []
+    
+    for sentence in info_sentences:
+        lower_sentence = sentence.lower()
+        if any(term in lower_sentence for term in query_terms):
+            relevant_sentences.append(sentence)
+    
+    # If we don't have enough relevant sentences, add some others
+    if len(relevant_sentences) < 3 and info_sentences:
+        for sentence in info_sentences:
+            if sentence not in relevant_sentences:
+                relevant_sentences.append(sentence)
+            if len(relevant_sentences) >= 5:
+                break
+    
+    # Construct the main body of the response
+    if relevant_sentences:
+        # Join the relevant sentences into a coherent paragraph
+        main_content = ". ".join(relevant_sentences[:5])
+        if not main_content.endswith('.'):
+            main_content += '.'
+        response += main_content + "\n\n"
+    else:
+        response += "I couldn't find detailed information directly answering your query.\n\n"
+    
+    # Add sources
+    response += "Sources:\n"
+    for idx, result in enumerate(search_results, 1):
+        response += f"{idx}. {result['title']} - {result['link']}\n"
+    
+    return response
+
+def generate_fallback_response(prompt, temperature=0.7):
+    """
+    Fallback response generator when web search fails or is disabled.
     """
     # Simple responses based on keywords
     responses = [
-        "I'm TheoGPT, a language model designed to simulate ChatGPT functionality.",
-        "Based on my analysis, that would require further consideration.",
-        "That's an interesting question. From my perspective...",
-        "I can help you with that! Here's what you need to know:",
-        "There are several approaches to solving this problem.",
-        "Let me think about this from different angles.",
-        "I don't have enough information to provide a complete answer.",
-        "That's beyond my current capabilities, but I can suggest alternatives.",
+        "I'm TheoGPT, a language model that tries to find information from the web.",
+        "Based on general knowledge, this topic relates to various factors that would need further research.",
+        "Without specific web information, I can only offer a general response on this topic.",
+        "I'd need to search for more current information to give you a complete answer.",
+        "This question would benefit from specific data that I couldn't retrieve at the moment.",
+        "From a general perspective, this topic involves multiple considerations.",
+        "I don't have enough specific information to provide a detailed answer.",
+        "This appears to be a specialized topic that would require detailed research.",
     ]
     
     # Add some domain-specific responses based on keywords
     if "python" in prompt.lower() or "code" in prompt.lower():
-        responses.append("```python\n# Here's a Python solution\ndef example_function():\n    return 'This is a sample code block'\n```")
+        responses.append("This seems to be related to programming. For specific code solutions, I'd need to find current best practices and documentation.")
     
     if "explain" in prompt.lower() or "what is" in prompt.lower():
-        responses.append("To explain this concept, I need to break it down into key components...")
+        responses.append("To explain this concept properly, I'd need to gather information from reliable sources. In general terms, this relates to a topic that has multiple aspects and interpretations.")
     
-    # Randomly select a response with some "thinking" delay
-    time.sleep(1)  # Simulating "thinking" time
     return random.choice(responses)
 
 # Login/Registration Screen
@@ -346,7 +567,7 @@ def show_chat_interface():
     # Main content - chat interface
     with col2:
         # Options row
-        option_col1, option_col2, option_col3 = st.columns([1, 1, 1])
+        option_col1, option_col2, option_col3, option_col4 = st.columns([1, 1, 1, 1])
         
         with option_col1:
             # Model selection dropdown
@@ -365,8 +586,13 @@ def show_chat_interface():
                 step=0.1,
                 help="Higher values make output more random, lower values make it more deterministic"
             )
-        
+            
         with option_col3:
+            # Web search toggle
+            st.session_state.use_web_search = st.checkbox("Use web search", value=True, 
+                                                        help="Enable to allow TheoGPT to search the internet for information")
+        
+        with option_col4:
             # Save conversation button
             if st.button("Save conversation"):
                 if st.session_state.messages:
@@ -428,11 +654,17 @@ def show_chat_interface():
             </div>
             """, unsafe_allow_html=True)
             
-            # Generate response
-            response = generate_response(
-                st.session_state.messages[-1]["content"], 
-                temperature=temperature
-            )
+            # Generate response based on whether web search is enabled
+            if st.session_state.use_web_search:
+                response = search_and_generate_response(
+                    st.session_state.messages[-1]["content"], 
+                    temperature=temperature
+                )
+            else:
+                response = generate_fallback_response(
+                    st.session_state.messages[-1]["content"], 
+                    temperature=temperature
+                )
             
             # Add assistant message to chat history
             st.session_state.messages.append({"role": "assistant", "content": response})
